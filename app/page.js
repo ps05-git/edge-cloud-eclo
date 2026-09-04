@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+
 import {
   BarChart,
   Bar,
@@ -26,37 +27,231 @@ export default function Home() {
   const [results, setResults] = useState([]);
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(true);
   const [error, setError] = useState("");
 
+  /*
+   * Load saved MongoDB simulations when the page opens.
+   */
   useEffect(() => {
     loadHistory();
   }, []);
 
-  async function loadHistory() {
-    try {
-      const response = await fetch("/api/simulations");
+  /*
+   * Convert MongoDB/API records into a common format.
+   *
+   * The backend may return:
+   *
+   * {
+   *   algorithm: "Static",
+   *   metrics: {
+   *      latency: ...,
+   *      throughput: ...,
+   *      eclo: ...
+   *   }
+   * }
+   *
+   * OR:
+   *
+   * {
+   *   algorithm: "Static",
+   *   latency: ...
+   * }
+   */
+  function normalizeResult(item, index = 0) {
+    const metrics =
+      item?.metrics && typeof item.metrics === "object"
+        ? item.metrics
+        : item || {};
 
-      if (!response.ok) {
-        throw new Error("Failed to load simulation history");
-      }
+    const algorithm =
+      item?.algorithm ||
+      metrics?.algorithm ||
+      item?.name ||
+      metrics?.name ||
+      item?.policy ||
+      metrics?.policy ||
+      `Algorithm ${index + 1}`;
+
+    const latency = Number(
+      metrics?.latency ??
+        metrics?.averageLatency ??
+        metrics?.avgLatency ??
+        item?.latency ??
+        item?.averageLatency ??
+        0
+    );
+
+    const waitingTime = Number(
+      metrics?.waitingTime ??
+        metrics?.waiting ??
+        metrics?.averageWaitingTime ??
+        item?.waitingTime ??
+        item?.waiting ??
+        0
+    );
+
+    const throughput = Number(
+      metrics?.throughput ??
+        metrics?.edgeThroughput ??
+        item?.throughput ??
+        item?.edgeThroughput ??
+        0
+    );
+
+    let eclo = Number(
+      metrics?.eclo ??
+        metrics?.ecloScore ??
+        metrics?.ECLO ??
+        item?.eclo ??
+        item?.ecloScore ??
+        item?.ECLO ??
+        0
+    );
+
+    /*
+     * Convert decimal ECLO to percentage.
+     *
+     * Example:
+     * 0.6477 -> 64.77
+     */
+    if (eclo > 0 && eclo <= 1) {
+      eclo *= 100;
+    }
+
+    let utilization = Number(
+      metrics?.utilization ??
+        metrics?.utilizationPercent ??
+        metrics?.vmUtilization ??
+        item?.utilization ??
+        item?.utilizationPercent ??
+        item?.vmUtilization ??
+        0
+    );
+
+    /*
+     * Convert decimal utilization to percentage.
+     *
+     * Example:
+     * 0.1366 -> 13.66
+     */
+    if (utilization > 0 && utilization <= 1) {
+      utilization *= 100;
+    }
+
+    const vms = Number(
+      metrics?.vms ??
+        metrics?.vmCount ??
+        metrics?.maxVMCount ??
+        metrics?.maximumVMCount ??
+        item?.vms ??
+        item?.vmCount ??
+        item?.maxVMCount ??
+        item?.maximumVMCount ??
+        1
+    );
+
+    return {
+      algorithm,
+      latency: Number.isFinite(latency)
+        ? Number(latency.toFixed(4))
+        : 0,
+
+      waitingTime: Number.isFinite(waitingTime)
+        ? Number(waitingTime.toFixed(4))
+        : 0,
+
+      throughput: Number.isFinite(throughput)
+        ? Number(throughput.toFixed(4))
+        : 0,
+
+      eclo: Number.isFinite(eclo)
+        ? Number(eclo.toFixed(2))
+        : 0,
+
+      utilization: Number.isFinite(utilization)
+        ? Number(utilization.toFixed(2))
+        : 0,
+
+      vms: Number.isFinite(vms) ? vms : 1,
+    };
+  }
+
+  /*
+   * Load simulation history from MongoDB.
+   *
+   * IMPORTANT:
+   * We also restore the latest simulation into `results`.
+   * This is what prevents the charts/results from disappearing
+   * after refreshing the page.
+   */
+  async function loadHistory() {
+    setLoadingHistory(true);
+
+    try {
+      const response = await fetch("/api/simulations", {
+        method: "GET",
+        cache: "no-store",
+      });
 
       const data = await response.json();
 
+      if (!response.ok) {
+        throw new Error(
+          data?.error || "Failed to load simulation history"
+        );
+      }
+
+      let savedSimulations = [];
+
       if (Array.isArray(data)) {
-        setHistory(data);
+        savedSimulations = data;
       } else if (Array.isArray(data.simulations)) {
-        setHistory(data.simulations);
+        savedSimulations = data.simulations;
       } else if (Array.isArray(data.results)) {
-        setHistory(data.results);
+        savedSimulations = data.results;
+      }
+
+      setHistory(savedSimulations);
+
+      /*
+       * Restore the latest simulation.
+       *
+       * The API returns newest records first.
+       * Each simulation run currently creates four records:
+       *
+       * Static
+       * Dynamic
+       * Integrated
+       * Adaptive Integrated
+       *
+       * Therefore the newest four records represent
+       * the latest run.
+       */
+      if (savedSimulations.length > 0) {
+        const latestRecords = savedSimulations.slice(0, 4);
+
+        const restoredResults = latestRecords.map(
+          (item, index) => normalizeResult(item, index)
+        );
+
+        setResults(restoredResults);
       } else {
-        setHistory([]);
+        setResults([]);
       }
     } catch (err) {
-      console.error(err);
+      console.error("History loading error:", err);
+
       setHistory([]);
+      setResults([]);
+    } finally {
+      setLoadingHistory(false);
     }
   }
 
+  /*
+   * Input change handler.
+   */
   function handleChange(e) {
     const { name, value } = e.target;
 
@@ -66,6 +261,9 @@ export default function Home() {
     }));
   }
 
+  /*
+   * Run a new simulation.
+   */
   async function runSimulation() {
     setLoading(true);
     setError("");
@@ -82,14 +280,11 @@ export default function Home() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || "Simulation failed");
+        throw new Error(
+          data?.error || "Simulation failed"
+        );
       }
 
-      /*
-       * The API may return:
-       * { results: [...] }
-       * or simply [...]
-       */
       let simulationResults = [];
 
       if (Array.isArray(data)) {
@@ -100,126 +295,88 @@ export default function Home() {
         simulationResults = data.simulations;
       }
 
-      setResults(simulationResults);
+      /*
+       * Normalize the returned simulation results.
+       */
+      const normalizedResults = simulationResults.map(
+        (item, index) => normalizeResult(item, index)
+      );
 
+      setResults(normalizedResults);
+
+      /*
+       * Reload MongoDB history.
+       *
+       * This also restores the latest run.
+       */
       await loadHistory();
     } catch (err) {
-      console.error(err);
-      setError(err.message || "Something went wrong");
+      console.error("Simulation error:", err);
+
+      setError(
+        err?.message || "Something went wrong"
+      );
     } finally {
       setLoading(false);
     }
   }
 
   /*
-   * Normalize the API response before sending it to Recharts.
-   *
-   * This fixes:
-   * 1. "Unknown" algorithm labels
-   * 2. ECLO being shown as 6400 instead of 64
-   * 3. Utilization being shown as 1300 instead of 13
+   * Chart data is already normalized.
    */
-  const chartData = (Array.isArray(results) ? results : []).map(
-    (item, index) => {
-      const algorithm =
-        item?.algorithm ||
-        item?.name ||
-        item?.policy ||
-        `Algorithm ${index + 1}`;
+  const chartData = Array.isArray(results)
+    ? results
+    : [];
 
-      const latency = Number(
-        item?.latency ??
-          item?.averageLatency ??
-          item?.avgLatency ??
-          0
-      );
-
-      const waitingTime = Number(
-        item?.waitingTime ??
-          item?.waiting ??
-          item?.averageWaitingTime ??
-          0
-      );
-
-      const throughput = Number(
-        item?.throughput ??
-          item?.edgeThroughput ??
-          0
-      );
-
-      /*
-       * Backend values may be:
-       * 64.77  -> already percentage
-       * 0.6477 -> decimal percentage
-       *
-       * Normalize both to 0-100.
-       */
-      let eclo = Number(
-        item?.eclo ??
-          item?.ecloScore ??
-          item?.ECLO ??
-          0
-      );
-
-      if (eclo > 0 && eclo <= 1) {
-        eclo = eclo * 100;
-      }
-
-      let utilization = Number(
-        item?.utilization ??
-          item?.utilizationPercent ??
-          item?.vmUtilization ??
-          0
-      );
-
-      if (utilization > 0 && utilization <= 1) {
-        utilization = utilization * 100;
-      }
-
-      const vms = Number(
-        item?.vms ??
-          item?.vmCount ??
-          item?.maxVMCount ??
-          item?.maximumVMCount ??
-          1
-      );
-
-      return {
-        algorithm,
-        latency: Number(latency.toFixed(4)),
-        waitingTime: Number(waitingTime.toFixed(4)),
-        throughput: Number(throughput.toFixed(4)),
-        eclo: Number(eclo.toFixed(2)),
-        utilization: Number(utilization.toFixed(2)),
-        vms,
-      };
-    }
-  );
-
+  /*
+   * Best ECLO.
+   */
   const bestECLO =
     chartData.length > 0
-      ? Math.max(...chartData.map((item) => item.eclo))
+      ? Math.max(
+          ...chartData.map((item) => item.eclo)
+        )
       : 0;
 
+  /*
+   * Lowest latency.
+   */
   const lowestLatency =
     chartData.length > 0
-      ? Math.min(...chartData.map((item) => item.latency))
+      ? Math.min(
+          ...chartData.map((item) => item.latency)
+        )
       : 0;
 
+  /*
+   * Highest throughput.
+   */
   const highestThroughput =
     chartData.length > 0
-      ? Math.max(...chartData.map((item) => item.throughput))
+      ? Math.max(
+          ...chartData.map((item) => item.throughput)
+        )
       : 0;
 
+  /*
+   * Maximum VM count.
+   */
   const maximumVMCount =
     chartData.length > 0
-      ? Math.max(...chartData.map((item) => item.vms))
+      ? Math.max(
+          ...chartData.map((item) => item.vms)
+        )
       : 0;
 
+  /*
+   * Best algorithm.
+   */
   const bestAlgorithm =
     chartData.length > 0
       ? chartData.reduce((best, current) =>
-          current.eclo > best.eclo ? current : best
+          current.eclo > best.eclo
+            ? current
+            : best
         ).algorithm
       : "-";
 
@@ -238,14 +395,17 @@ export default function Home() {
           margin: "0 auto",
         }}
       >
-        {/* HEADER */}
+
+        {/* ================= HEADER ================= */}
+
         <div
           style={{
             background: "#ffffff",
             padding: "30px",
             borderRadius: "14px",
             marginBottom: "25px",
-            boxShadow: "0 2px 10px rgba(0,0,0,0.08)",
+            boxShadow:
+              "0 2px 10px rgba(0,0,0,0.08)",
           }}
         >
           <h1
@@ -264,18 +424,21 @@ export default function Home() {
               fontSize: "17px",
             }}
           >
-            Priority-Based Scheduling with Dynamic VM Allocation
+            Priority-Based Scheduling with Dynamic
+            VM Allocation
           </p>
         </div>
 
-        {/* CONFIGURATION */}
+        {/* ================= CONFIGURATION ================= */}
+
         <section
           style={{
             background: "#ffffff",
             padding: "25px",
             borderRadius: "14px",
             marginBottom: "25px",
-            boxShadow: "0 2px 10px rgba(0,0,0,0.08)",
+            boxShadow:
+              "0 2px 10px rgba(0,0,0,0.08)",
           }}
         >
           <h2>Simulation Configuration</h2>
@@ -347,14 +510,20 @@ export default function Home() {
               padding: "13px 25px",
               border: "none",
               borderRadius: "8px",
-              background: loading ? "#999" : "#2563eb",
+              background: loading
+                ? "#999"
+                : "#2563eb",
               color: "white",
               fontSize: "16px",
               fontWeight: "bold",
-              cursor: loading ? "not-allowed" : "pointer",
+              cursor: loading
+                ? "not-allowed"
+                : "pointer",
             }}
           >
-            {loading ? "Running Simulation..." : "Run Simulation"}
+            {loading
+              ? "Running Simulation..."
+              : "Run Simulation"}
           </button>
 
           {error && (
@@ -372,16 +541,20 @@ export default function Home() {
           )}
         </section>
 
-        {/* RESULTS */}
+        {/* ================= RESULTS ================= */}
+
         {chartData.length > 0 && (
           <>
+            {/* SUMMARY */}
+
             <section
               style={{
                 background: "#ffffff",
                 padding: "25px",
                 borderRadius: "14px",
                 marginBottom: "25px",
-                boxShadow: "0 2px 10px rgba(0,0,0,0.08)",
+                boxShadow:
+                  "0 2px 10px rgba(0,0,0,0.08)",
               }}
             >
               <h2>Simulation Results</h2>
@@ -422,10 +595,16 @@ export default function Home() {
             </section>
 
             {/* LATENCY */}
+
             <ChartCard title="Latency & Waiting Time Comparison">
-              <ResponsiveContainer width="100%" height={400}>
+              <ResponsiveContainer
+                width="100%"
+                height={400}
+              >
                 <BarChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" />
+                  <CartesianGrid
+                    strokeDasharray="3 3"
+                  />
 
                   <XAxis
                     dataKey="algorithm"
@@ -452,10 +631,16 @@ export default function Home() {
             </ChartCard>
 
             {/* THROUGHPUT */}
+
             <ChartCard title="Throughput Comparison">
-              <ResponsiveContainer width="100%" height={400}>
+              <ResponsiveContainer
+                width="100%"
+                height={400}
+              >
                 <BarChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" />
+                  <CartesianGrid
+                    strokeDasharray="3 3"
+                  />
 
                   <XAxis
                     dataKey="algorithm"
@@ -477,10 +662,16 @@ export default function Home() {
             </ChartCard>
 
             {/* ECLO */}
+
             <ChartCard title="ECLO Score Comparison">
-              <ResponsiveContainer width="100%" height={400}>
+              <ResponsiveContainer
+                width="100%"
+                height={400}
+              >
                 <BarChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" />
+                  <CartesianGrid
+                    strokeDasharray="3 3"
+                  />
 
                   <XAxis
                     dataKey="algorithm"
@@ -489,7 +680,9 @@ export default function Home() {
 
                   <YAxis
                     domain={[0, 100]}
-                    tickFormatter={(value) => `${value}%`}
+                    tickFormatter={(value) =>
+                      `${value}%`
+                    }
                   />
 
                   <Tooltip
@@ -509,10 +702,16 @@ export default function Home() {
             </ChartCard>
 
             {/* UTILIZATION */}
+
             <ChartCard title="VM Utilization Comparison">
-              <ResponsiveContainer width="100%" height={400}>
+              <ResponsiveContainer
+                width="100%"
+                height={400}
+              >
                 <BarChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" />
+                  <CartesianGrid
+                    strokeDasharray="3 3"
+                  />
 
                   <XAxis
                     dataKey="algorithm"
@@ -521,7 +720,9 @@ export default function Home() {
 
                   <YAxis
                     domain={[0, 100]}
-                    tickFormatter={(value) => `${value}%`}
+                    tickFormatter={(value) =>
+                      `${value}%`
+                    }
                   />
 
                   <Tooltip
@@ -541,10 +742,16 @@ export default function Home() {
             </ChartCard>
 
             {/* VM COUNT */}
+
             <ChartCard title="VM Count Comparison">
-              <ResponsiveContainer width="100%" height={400}>
+              <ResponsiveContainer
+                width="100%"
+                height={400}
+              >
                 <BarChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" />
+                  <CartesianGrid
+                    strokeDasharray="3 3"
+                  />
 
                   <XAxis
                     dataKey="algorithm"
@@ -565,14 +772,16 @@ export default function Home() {
               </ResponsiveContainer>
             </ChartCard>
 
-            {/* TABLE */}
+            {/* DETAILED TABLE */}
+
             <section
               style={{
                 background: "#ffffff",
                 padding: "25px",
                 borderRadius: "14px",
                 marginBottom: "25px",
-                boxShadow: "0 2px 10px rgba(0,0,0,0.08)",
+                boxShadow:
+                  "0 2px 10px rgba(0,0,0,0.08)",
                 overflowX: "auto",
               }}
             >
@@ -587,19 +796,41 @@ export default function Home() {
               >
                 <thead>
                   <tr>
-                    <TableHeader>Algorithm</TableHeader>
-                    <TableHeader>Latency</TableHeader>
-                    <TableHeader>Waiting Time</TableHeader>
-                    <TableHeader>Throughput</TableHeader>
-                    <TableHeader>Utilization</TableHeader>
-                    <TableHeader>VMs</TableHeader>
-                    <TableHeader>ECLO</TableHeader>
+                    <TableHeader>
+                      Algorithm
+                    </TableHeader>
+
+                    <TableHeader>
+                      Latency
+                    </TableHeader>
+
+                    <TableHeader>
+                      Waiting Time
+                    </TableHeader>
+
+                    <TableHeader>
+                      Throughput
+                    </TableHeader>
+
+                    <TableHeader>
+                      Utilization
+                    </TableHeader>
+
+                    <TableHeader>
+                      VMs
+                    </TableHeader>
+
+                    <TableHeader>
+                      ECLO
+                    </TableHeader>
                   </tr>
                 </thead>
 
                 <tbody>
                   {chartData.map((item, index) => (
-                    <tr key={`${item.algorithm}-${index}`}>
+                    <tr
+                      key={`${item.algorithm}-${index}`}
+                    >
                       <TableCell>
                         {item.algorithm}
                       </TableCell>
@@ -635,20 +866,24 @@ export default function Home() {
           </>
         )}
 
-        {/* HISTORY */}
+        {/* ================= MONGODB HISTORY ================= */}
+
         <section
           style={{
             background: "#ffffff",
             padding: "25px",
             borderRadius: "14px",
             marginBottom: "25px",
-            boxShadow: "0 2px 10px rgba(0,0,0,0.08)",
+            boxShadow:
+              "0 2px 10px rgba(0,0,0,0.08)",
             overflowX: "auto",
           }}
         >
           <h2>MongoDB Simulation History</h2>
 
-          {history.length === 0 ? (
+          {loadingHistory ? (
+            <p>Loading simulation history...</p>
+          ) : history.length === 0 ? (
             <p>No simulations saved yet.</p>
           ) : (
             <table
@@ -660,60 +895,61 @@ export default function Home() {
             >
               <thead>
                 <tr>
-                  <TableHeader>Algorithm</TableHeader>
-                  <TableHeader>Latency</TableHeader>
-                  <TableHeader>ECLO Score</TableHeader>
-                  <TableHeader>VMs</TableHeader>
-                  <TableHeader>Date</TableHeader>
+                  <TableHeader>
+                    Algorithm
+                  </TableHeader>
+
+                  <TableHeader>
+                    Latency
+                  </TableHeader>
+
+                  <TableHeader>
+                    ECLO Score
+                  </TableHeader>
+
+                  <TableHeader>
+                    VMs
+                  </TableHeader>
+
+                  <TableHeader>
+                    Date
+                  </TableHeader>
                 </tr>
               </thead>
 
               <tbody>
                 {history.map((item, index) => {
-                  const metrics = item.metrics || item;
-
-                  const latency = Number(
-                    metrics?.latency ??
-                      metrics?.averageLatency ??
-                      0
-                  );
-
-                  let eclo = Number(
-                    metrics?.eclo ??
-                      metrics?.ecloScore ??
-                      item?.eclo ??
-                      0
-                  );
-
-                  if (eclo > 0 && eclo <= 1) {
-                    eclo *= 100;
-                  }
-
-                  const vms = Number(
-                    metrics?.vms ??
-                      metrics?.vmCount ??
-                      item?.vms ??
-                      1
-                  );
+                  const normalized =
+                    normalizeResult(
+                      item,
+                      index
+                    );
 
                   return (
-                    <tr key={item._id || index}>
+                    <tr
+                      key={
+                        item?._id ||
+                        `${item.algorithm}-${index}`
+                      }
+                    >
                       <TableCell>
-                        {item.algorithm || "Unknown"}
+                        {normalized.algorithm}
                       </TableCell>
 
                       <TableCell>
-                        {latency.toFixed(4)}
+                        {normalized.latency.toFixed(4)}
                       </TableCell>
 
                       <TableCell>
-                        {eclo.toFixed(2)}%
+                        {normalized.eclo.toFixed(2)}%
                       </TableCell>
 
-                      <TableCell>{vms}</TableCell>
+                      <TableCell>
+                        {normalized.vms}
+                      </TableCell>
 
                       <TableCell>
-                        {item.createdAt
+                        {item?.createdAt
                           ? new Date(
                               item.createdAt
                             ).toLocaleString()
@@ -726,6 +962,8 @@ export default function Home() {
             </table>
           )}
         </section>
+
+        {/* ================= FOOTER ================= */}
 
         <footer
           style={{
@@ -741,7 +979,9 @@ export default function Home() {
   );
 }
 
-/* ---------------- COMPONENTS ---------------- */
+/* =====================================================
+   INPUT FIELD
+===================================================== */
 
 function InputField({
   label,
@@ -782,6 +1022,10 @@ function InputField({
   );
 }
 
+/* =====================================================
+   METRIC CARD
+===================================================== */
+
 function MetricCard({ title, value }) {
   return (
     <div
@@ -814,6 +1058,10 @@ function MetricCard({ title, value }) {
   );
 }
 
+/* =====================================================
+   CHART CARD
+===================================================== */
+
 function ChartCard({ title, children }) {
   return (
     <section
@@ -822,7 +1070,8 @@ function ChartCard({ title, children }) {
         padding: "25px",
         borderRadius: "14px",
         marginBottom: "25px",
-        boxShadow: "0 2px 10px rgba(0,0,0,0.08)",
+        boxShadow:
+          "0 2px 10px rgba(0,0,0,0.08)",
       }}
     >
       <h2>{title}</h2>
@@ -839,6 +1088,10 @@ function ChartCard({ title, children }) {
   );
 }
 
+/* =====================================================
+   TABLE HEADER
+===================================================== */
+
 function TableHeader({ children }) {
   return (
     <th
@@ -853,6 +1106,10 @@ function TableHeader({ children }) {
     </th>
   );
 }
+
+/* =====================================================
+   TABLE CELL
+===================================================== */
 
 function TableCell({ children }) {
   return (
