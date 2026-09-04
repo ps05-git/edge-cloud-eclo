@@ -37,7 +37,7 @@ export default function Home() {
       const response = await fetch("/api/simulations");
 
       if (!response.ok) {
-        return;
+        throw new Error("Failed to load simulation history");
       }
 
       const data = await response.json();
@@ -46,48 +46,24 @@ export default function Home() {
         setHistory(data);
       } else if (Array.isArray(data.simulations)) {
         setHistory(data.simulations);
-      } else if (Array.isArray(data.data)) {
-        setHistory(data.data);
+      } else if (Array.isArray(data.results)) {
+        setHistory(data.results);
       } else {
         setHistory([]);
       }
     } catch (err) {
-      console.error("History error:", err);
+      console.error(err);
+      setHistory([]);
     }
   }
 
-  function updateConfig(field, value) {
+  function handleChange(e) {
+    const { name, value } = e.target;
+
     setConfig((previous) => ({
       ...previous,
-      [field]: Number(value),
+      [name]: Number(value),
     }));
-  }
-
-  function extractResults(data) {
-    if (Array.isArray(data)) {
-      return data;
-    }
-
-    if (Array.isArray(data.results)) {
-      return data.results;
-    }
-
-    if (
-      data.results &&
-      typeof data.results === "object"
-    ) {
-      return Object.values(data.results);
-    }
-
-    if (Array.isArray(data.simulations)) {
-      return data.simulations;
-    }
-
-    if (Array.isArray(data.data)) {
-      return data.data;
-    }
-
-    return [];
   }
 
   async function runSimulation() {
@@ -106,17 +82,22 @@ export default function Home() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(
-          data.error || "Simulation failed"
-        );
+        throw new Error(data.error || "Simulation failed");
       }
 
-      const simulationResults = extractResults(data);
+      /*
+       * The API may return:
+       * { results: [...] }
+       * or simply [...]
+       */
+      let simulationResults = [];
 
-      if (!simulationResults.length) {
-        throw new Error(
-          "Simulation completed, but no results were returned."
-        );
+      if (Array.isArray(data)) {
+        simulationResults = data;
+      } else if (Array.isArray(data.results)) {
+        simulationResults = data.results;
+      } else if (Array.isArray(data.simulations)) {
+        simulationResults = data.simulations;
       }
 
       setResults(simulationResults);
@@ -124,736 +105,764 @@ export default function Home() {
       await loadHistory();
     } catch (err) {
       console.error(err);
-      setError(err.message);
-      setResults([]);
+      setError(err.message || "Something went wrong");
     } finally {
       setLoading(false);
     }
   }
 
-  function getLatency(item) {
-    return Number(
-      item.latency ??
-        item.averageLatency ??
-        item.avgLatency ??
-        0
-    );
-  }
+  /*
+   * Normalize the API response before sending it to Recharts.
+   *
+   * This fixes:
+   * 1. "Unknown" algorithm labels
+   * 2. ECLO being shown as 6400 instead of 64
+   * 3. Utilization being shown as 1300 instead of 13
+   */
+  const chartData = (Array.isArray(results) ? results : []).map(
+    (item, index) => {
+      const algorithm =
+        item?.algorithm ||
+        item?.name ||
+        item?.policy ||
+        `Algorithm ${index + 1}`;
 
-  function getWaiting(item) {
-    return Number(
-      item.waitingTime ??
-        item.waiting ??
-        item.averageWaitingTime ??
-        0
-    );
-  }
+      const latency = Number(
+        item?.latency ??
+          item?.averageLatency ??
+          item?.avgLatency ??
+          0
+      );
 
-  function getThroughput(item) {
-    return Number(item.throughput ?? 0);
-  }
+      const waitingTime = Number(
+        item?.waitingTime ??
+          item?.waiting ??
+          item?.averageWaitingTime ??
+          0
+      );
 
-  function getUtilization(item) {
-    return Number(
-      item.utilization ??
-        item.vmUtilization ??
-        item.cloudUtilization ??
-        0
-    );
-  }
+      const throughput = Number(
+        item?.throughput ??
+          item?.edgeThroughput ??
+          0
+      );
 
-  function getVMs(item) {
-    return Number(
-      item.vms ??
-        item.vmCount ??
-        item.maxVMs ??
-        item.maximumVMs ??
-        1
-    );
-  }
+      /*
+       * Backend values may be:
+       * 64.77  -> already percentage
+       * 0.6477 -> decimal percentage
+       *
+       * Normalize both to 0-100.
+       */
+      let eclo = Number(
+        item?.eclo ??
+          item?.ecloScore ??
+          item?.ECLO ??
+          0
+      );
 
-  function getECLO(item) {
-    return Number(
-      item.eclo ??
-        item.ECLO ??
-        item.ecloScore ??
-        0
-    );
-  }
+      if (eclo > 0 && eclo <= 1) {
+        eclo = eclo * 100;
+      }
 
-  const bestResult =
-    results.length > 0
-      ? results.reduce((best, current) =>
-          getECLO(current) > getECLO(best)
-            ? current
-            : best
-        )
-      : null;
+      let utilization = Number(
+        item?.utilization ??
+          item?.utilizationPercent ??
+          item?.vmUtilization ??
+          0
+      );
 
-  const chartData = Array.isArray(results)
-    ? results.map((item) => ({
-        algorithm: String(
-          item.algorithm ?? "Unknown"
-        ),
-        latency: getLatency(item),
-        throughput: getThroughput(item),
-        eclo: getECLO(item) * 100,
-        utilization: getUtilization(item) * 100,
-      }))
-    : [];
+      if (utilization > 0 && utilization <= 1) {
+        utilization = utilization * 100;
+      }
+
+      const vms = Number(
+        item?.vms ??
+          item?.vmCount ??
+          item?.maxVMCount ??
+          item?.maximumVMCount ??
+          1
+      );
+
+      return {
+        algorithm,
+        latency: Number(latency.toFixed(4)),
+        waitingTime: Number(waitingTime.toFixed(4)),
+        throughput: Number(throughput.toFixed(4)),
+        eclo: Number(eclo.toFixed(2)),
+        utilization: Number(utilization.toFixed(2)),
+        vms,
+      };
+    }
+  );
+
+  const bestECLO =
+    chartData.length > 0
+      ? Math.max(...chartData.map((item) => item.eclo))
+      : 0;
 
   const lowestLatency =
-    results.length > 0
-      ? Math.min(
-          ...results.map((item) =>
-            getLatency(item)
-          )
-        )
+    chartData.length > 0
+      ? Math.min(...chartData.map((item) => item.latency))
       : 0;
 
   const highestThroughput =
-    results.length > 0
-      ? Math.max(
-          ...results.map((item) =>
-            getThroughput(item)
-          )
-        )
+    chartData.length > 0
+      ? Math.max(...chartData.map((item) => item.throughput))
       : 0;
 
-  const maximumVMs =
-    results.length > 0
-      ? Math.max(
-          ...results.map((item) =>
-            getVMs(item)
-          )
-        )
+  const maximumVMCount =
+    chartData.length > 0
+      ? Math.max(...chartData.map((item) => item.vms))
       : 0;
+
+  const bestAlgorithm =
+    chartData.length > 0
+      ? chartData.reduce((best, current) =>
+          current.eclo > best.eclo ? current : best
+        ).algorithm
+      : "-";
 
   return (
-    <main className="dashboard">
-
-      {/* HEADER */}
-
-      <header className="hero">
-        <div className="heroContent">
-
-          <div className="badge">
-            CLOUD COMPUTING PROJECT
-          </div>
-
-          <h1>
+    <main
+      style={{
+        minHeight: "100vh",
+        background: "#f5f7fb",
+        padding: "30px",
+        fontFamily: "Arial, sans-serif",
+      }}
+    >
+      <div
+        style={{
+          maxWidth: "1400px",
+          margin: "0 auto",
+        }}
+      >
+        {/* HEADER */}
+        <div
+          style={{
+            background: "#ffffff",
+            padding: "30px",
+            borderRadius: "14px",
+            marginBottom: "25px",
+            boxShadow: "0 2px 10px rgba(0,0,0,0.08)",
+          }}
+        >
+          <h1
+            style={{
+              margin: "0 0 10px",
+              fontSize: "34px",
+            }}
+          >
             Edge-Cloud ECLO Scheduler
           </h1>
 
-          <p>
-            Priority-Based Scheduling with
-            Dynamic VM Allocation
+          <p
+            style={{
+              margin: 0,
+              color: "#555",
+              fontSize: "17px",
+            }}
+          >
+            Priority-Based Scheduling with Dynamic VM Allocation
           </p>
-
-          <div className="heroInfo">
-            <span>⚡ Edge Computing</span>
-            <span>☁️ Cloud Computing</span>
-            <span>🧠 Priority Scheduling</span>
-            <span>🔄 Dynamic VM Allocation</span>
-          </div>
-
         </div>
-      </header>
-
-      <section className="content">
 
         {/* CONFIGURATION */}
+        <section
+          style={{
+            background: "#ffffff",
+            padding: "25px",
+            borderRadius: "14px",
+            marginBottom: "25px",
+            boxShadow: "0 2px 10px rgba(0,0,0,0.08)",
+          }}
+        >
+          <h2>Simulation Configuration</h2>
 
-        <div className="card">
-
-          <div className="sectionTitle">
-            <div>
-              <h2>
-                Simulation Configuration
-              </h2>
-
-              <p>
-                Configure the workload and
-                cloud resources for the simulation.
-              </p>
-            </div>
-          </div>
-
-          <div className="configGrid">
-
-            <ConfigInput
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns:
+                "repeat(auto-fit, minmax(220px, 1fr))",
+              gap: "18px",
+            }}
+          >
+            <InputField
               label="Number of Tasks"
+              name="tasks"
               value={config.tasks}
-              onChange={(event) =>
-                updateConfig(
-                  "tasks",
-                  event.target.value
-                )
-              }
+              onChange={handleChange}
             />
 
-            <ConfigInput
+            <InputField
               label="Arrival Rate (tasks/sec)"
+              name="arrivalRate"
               value={config.arrivalRate}
-              onChange={(event) =>
-                updateConfig(
-                  "arrivalRate",
-                  event.target.value
-                )
-              }
+              onChange={handleChange}
             />
 
-            <ConfigInput
+            <InputField
               label="Edge Capacity (tasks/sec)"
+              name="edgeCapacity"
               value={config.edgeCapacity}
-              onChange={(event) =>
-                updateConfig(
-                  "edgeCapacity",
-                  event.target.value
-                )
-              }
+              onChange={handleChange}
             />
 
-            <ConfigInput
+            <InputField
               label="VM Capacity (tasks/sec)"
+              name="vmCapacity"
               value={config.vmCapacity}
-              onChange={(event) =>
-                updateConfig(
-                  "vmCapacity",
-                  event.target.value
-                )
-              }
+              onChange={handleChange}
             />
 
-            <ConfigInput
+            <InputField
               label="Initial VMs"
+              name="initialVMs"
               value={config.initialVMs}
-              onChange={(event) =>
-                updateConfig(
-                  "initialVMs",
-                  event.target.value
-                )
-              }
+              onChange={handleChange}
             />
 
-            <ConfigInput
+            <InputField
               label="Maximum VMs"
+              name="maxVMs"
               value={config.maxVMs}
-              onChange={(event) =>
-                updateConfig(
-                  "maxVMs",
-                  event.target.value
-                )
-              }
+              onChange={handleChange}
             />
 
-            <ConfigInput
+            <InputField
               label="VM Threshold"
+              name="threshold"
               value={config.threshold}
               step="0.05"
-              onChange={(event) =>
-                updateConfig(
-                  "threshold",
-                  event.target.value
-                )
-              }
+              onChange={handleChange}
             />
-
           </div>
 
           <button
-            className="runButton"
             onClick={runSimulation}
             disabled={loading}
+            style={{
+              marginTop: "25px",
+              padding: "13px 25px",
+              border: "none",
+              borderRadius: "8px",
+              background: loading ? "#999" : "#2563eb",
+              color: "white",
+              fontSize: "16px",
+              fontWeight: "bold",
+              cursor: loading ? "not-allowed" : "pointer",
+            }}
           >
-            {loading
-              ? "Running Simulation..."
-              : "▶ Run Simulation"}
+            {loading ? "Running Simulation..." : "Run Simulation"}
           </button>
 
           {error && (
-            <div className="error">
+            <div
+              style={{
+                marginTop: "15px",
+                padding: "12px",
+                background: "#fee2e2",
+                color: "#b91c1c",
+                borderRadius: "8px",
+              }}
+            >
               {error}
             </div>
           )}
-
-        </div>
+        </section>
 
         {/* RESULTS */}
-
-        {results.length > 0 && (
+        {chartData.length > 0 && (
           <>
-            <div className="sectionHeading">
-              <h2>
-                Simulation Results
-              </h2>
+            <section
+              style={{
+                background: "#ffffff",
+                padding: "25px",
+                borderRadius: "14px",
+                marginBottom: "25px",
+                boxShadow: "0 2px 10px rgba(0,0,0,0.08)",
+              }}
+            >
+              <h2>Simulation Results</h2>
 
-              <p>
-                Performance comparison of all
-                scheduling algorithms.
-              </p>
-            </div>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns:
+                    "repeat(auto-fit, minmax(190px, 1fr))",
+                  gap: "15px",
+                }}
+              >
+                <MetricCard
+                  title="Best ECLO Score"
+                  value={`${bestECLO.toFixed(2)}%`}
+                />
 
-            {/* STATISTICS */}
+                <MetricCard
+                  title="Best Algorithm"
+                  value={bestAlgorithm}
+                />
 
-            <div className="statsGrid">
+                <MetricCard
+                  title="Lowest Latency"
+                  value={lowestLatency.toFixed(4)}
+                />
 
-              <StatCard
-                title="Best ECLO Score"
-                value={
-                  bestResult
-                    ? `${(
-                        getECLO(bestResult) *
-                        100
-                      ).toFixed(2)}%`
-                    : "-"
-                }
-                icon="🏆"
-              />
+                <MetricCard
+                  title="Highest Throughput"
+                  value={highestThroughput.toFixed(4)}
+                />
 
-              <StatCard
-                title="Lowest Latency"
-                value={
-                  `${lowestLatency.toFixed(
-                    4
-                  )} s`
-                }
-                icon="⚡"
-              />
-
-              <StatCard
-                title="Highest Throughput"
-                value={
-                  highestThroughput.toFixed(4)
-                }
-                icon="🚀"
-              />
-
-              <StatCard
-                title="Maximum VM Count"
-                value={maximumVMs}
-                icon="☁️"
-              />
-
-            </div>
-
-            {/* CHARTS */}
-
-            <div className="chartGrid">
-
-              <div className="card chartCard">
-
-                <h3>
-                  Latency Comparison
-                </h3>
-
-                <ResponsiveContainer
-                  width="100%"
-                  height={320}
-                >
-                  <BarChart data={chartData}>
-
-                    <CartesianGrid
-                      strokeDasharray="3 3"
-                    />
-
-                    <XAxis
-                      dataKey="algorithm"
-                    />
-
-                    <YAxis />
-
-                    <Tooltip />
-
-                    <Legend />
-
-                    <Bar
-                      dataKey="latency"
-                      name="Latency (seconds)"
-                    />
-
-                  </BarChart>
-                </ResponsiveContainer>
-
+                <MetricCard
+                  title="Maximum VM Count"
+                  value={maximumVMCount}
+                />
               </div>
-
-              <div className="card chartCard">
-
-                <h3>
-                  Throughput Comparison
-                </h3>
-
-                <ResponsiveContainer
-                  width="100%"
-                  height={320}
-                >
-                  <BarChart data={chartData}>
-
-                    <CartesianGrid
-                      strokeDasharray="3 3"
-                    />
-
-                    <XAxis
-                      dataKey="algorithm"
-                    />
-
-                    <YAxis />
-
-                    <Tooltip />
-
-                    <Legend />
-
-                    <Bar
-                      dataKey="throughput"
-                      name="Throughput"
-                    />
-
-                  </BarChart>
-                </ResponsiveContainer>
-
-              </div>
-
-              <div className="card chartCard">
-
-                <h3>
-                  ECLO Score Comparison
-                </h3>
-
-                <ResponsiveContainer
-                  width="100%"
-                  height={320}
-                >
-                  <BarChart data={chartData}>
-
-                    <CartesianGrid
-                      strokeDasharray="3 3"
-                    />
-
-                    <XAxis
-                      dataKey="algorithm"
-                    />
-
-                    <YAxis />
-
-                    <Tooltip />
-
-                    <Legend />
-
-                    <Bar
-                      dataKey="eclo"
-                      name="ECLO Score (%)"
-                    />
-
-                  </BarChart>
-                </ResponsiveContainer>
-
-              </div>
-
-              <div className="card chartCard">
-
-                <h3>
-                  VM Utilization Comparison
-                </h3>
-
-                <ResponsiveContainer
-                  width="100%"
-                  height={320}
-                >
-                  <BarChart data={chartData}>
-
-                    <CartesianGrid
-                      strokeDasharray="3 3"
-                    />
-
-                    <XAxis
-                      dataKey="algorithm"
-                    />
-
-                    <YAxis />
-
-                    <Tooltip />
-
-                    <Legend />
-
-                    <Bar
-                      dataKey="utilization"
-                      name="Utilization (%)"
-                    />
-
-                  </BarChart>
-                </ResponsiveContainer>
-
-              </div>
-
-            </div>
-
-            {/* DETAILED TABLE */}
-
-            <div className="card">
-
-              <h2>
-                Detailed Results
-              </h2>
-
-              <div className="tableWrapper">
-
-                <table>
-
-                  <thead>
-                    <tr>
-                      <th>Algorithm</th>
-                      <th>Latency</th>
-                      <th>Waiting Time</th>
-                      <th>Throughput</th>
-                      <th>Utilization</th>
-                      <th>VMs</th>
-                      <th>ECLO</th>
-                    </tr>
-                  </thead>
-
-                  <tbody>
-
-                    {results.map(
-                      (item, index) => (
-                        <tr key={index}>
-
-                          <td>
-                            <strong>
-                              {item.algorithm ??
-                                "Unknown"}
-                            </strong>
-                          </td>
-
-                          <td>
-                            {getLatency(
-                              item
-                            ).toFixed(4)}
-                          </td>
-
-                          <td>
-                            {getWaiting(
-                              item
-                            ).toFixed(4)}
-                          </td>
-
-                          <td>
-                            {getThroughput(
-                              item
-                            ).toFixed(4)}
-                          </td>
-
-                          <td>
-                            {(
-                              getUtilization(
-                                item
-                              ) * 100
-                            ).toFixed(2)}
-                            %
-                          </td>
-
-                          <td>
-                            {getVMs(item)}
-                          </td>
-
-                          <td>
-                            {(
-                              getECLO(item) *
-                              100
-                            ).toFixed(2)}
-                            %
-                          </td>
-
-                        </tr>
-                      )
-                    )}
-
-                  </tbody>
-
-                </table>
-
-              </div>
-
-            </div>
-
-          </>
-        )}
-
-        {/* MONGODB HISTORY */}
-
-        <div className="card">
-
-          <div className="sectionTitle">
-
-            <div>
-              <h2>
-                MongoDB Simulation History
-              </h2>
-
-              <p>
-                Previous simulation results
-                stored in MongoDB Atlas.
-              </p>
-            </div>
-
-          </div>
-
-          {history.length === 0 ? (
-
-            <div className="empty">
-              No simulations saved yet.
-            </div>
-
-          ) : (
-
-            <div className="tableWrapper">
-
-              <table>
-
+            </section>
+
+            {/* LATENCY */}
+            <ChartCard title="Latency & Waiting Time Comparison">
+              <ResponsiveContainer width="100%" height={400}>
+                <BarChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+
+                  <XAxis
+                    dataKey="algorithm"
+                    interval={0}
+                  />
+
+                  <YAxis />
+
+                  <Tooltip />
+
+                  <Legend />
+
+                  <Bar
+                    dataKey="latency"
+                    name="Latency"
+                  />
+
+                  <Bar
+                    dataKey="waitingTime"
+                    name="Waiting Time"
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </ChartCard>
+
+            {/* THROUGHPUT */}
+            <ChartCard title="Throughput Comparison">
+              <ResponsiveContainer width="100%" height={400}>
+                <BarChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+
+                  <XAxis
+                    dataKey="algorithm"
+                    interval={0}
+                  />
+
+                  <YAxis />
+
+                  <Tooltip />
+
+                  <Legend />
+
+                  <Bar
+                    dataKey="throughput"
+                    name="Throughput"
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </ChartCard>
+
+            {/* ECLO */}
+            <ChartCard title="ECLO Score Comparison">
+              <ResponsiveContainer width="100%" height={400}>
+                <BarChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+
+                  <XAxis
+                    dataKey="algorithm"
+                    interval={0}
+                  />
+
+                  <YAxis
+                    domain={[0, 100]}
+                    tickFormatter={(value) => `${value}%`}
+                  />
+
+                  <Tooltip
+                    formatter={(value) =>
+                      `${Number(value).toFixed(2)}%`
+                    }
+                  />
+
+                  <Legend />
+
+                  <Bar
+                    dataKey="eclo"
+                    name="ECLO Score (%)"
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </ChartCard>
+
+            {/* UTILIZATION */}
+            <ChartCard title="VM Utilization Comparison">
+              <ResponsiveContainer width="100%" height={400}>
+                <BarChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+
+                  <XAxis
+                    dataKey="algorithm"
+                    interval={0}
+                  />
+
+                  <YAxis
+                    domain={[0, 100]}
+                    tickFormatter={(value) => `${value}%`}
+                  />
+
+                  <Tooltip
+                    formatter={(value) =>
+                      `${Number(value).toFixed(2)}%`
+                    }
+                  />
+
+                  <Legend />
+
+                  <Bar
+                    dataKey="utilization"
+                    name="Utilization (%)"
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </ChartCard>
+
+            {/* VM COUNT */}
+            <ChartCard title="VM Count Comparison">
+              <ResponsiveContainer width="100%" height={400}>
+                <BarChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+
+                  <XAxis
+                    dataKey="algorithm"
+                    interval={0}
+                  />
+
+                  <YAxis allowDecimals={false} />
+
+                  <Tooltip />
+
+                  <Legend />
+
+                  <Bar
+                    dataKey="vms"
+                    name="VM Count"
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </ChartCard>
+
+            {/* TABLE */}
+            <section
+              style={{
+                background: "#ffffff",
+                padding: "25px",
+                borderRadius: "14px",
+                marginBottom: "25px",
+                boxShadow: "0 2px 10px rgba(0,0,0,0.08)",
+                overflowX: "auto",
+              }}
+            >
+              <h2>Detailed Results</h2>
+
+              <table
+                style={{
+                  width: "100%",
+                  borderCollapse: "collapse",
+                  minWidth: "800px",
+                }}
+              >
                 <thead>
                   <tr>
-                    <th>Algorithm</th>
-                    <th>Latency</th>
-                    <th>ECLO Score</th>
-                    <th>VMs</th>
-                    <th>Date</th>
+                    <TableHeader>Algorithm</TableHeader>
+                    <TableHeader>Latency</TableHeader>
+                    <TableHeader>Waiting Time</TableHeader>
+                    <TableHeader>Throughput</TableHeader>
+                    <TableHeader>Utilization</TableHeader>
+                    <TableHeader>VMs</TableHeader>
+                    <TableHeader>ECLO</TableHeader>
                   </tr>
                 </thead>
 
                 <tbody>
+                  {chartData.map((item, index) => (
+                    <tr key={`${item.algorithm}-${index}`}>
+                      <TableCell>
+                        {item.algorithm}
+                      </TableCell>
 
-                  {history.map(
-                    (item, index) => (
-                      <tr
-                        key={
-                          item._id ||
-                          index
-                        }
-                      >
+                      <TableCell>
+                        {item.latency.toFixed(4)}
+                      </TableCell>
 
-                        <td>
-                          <strong>
-                            {item.algorithm ??
-                              "Unknown"}
-                          </strong>
-                        </td>
+                      <TableCell>
+                        {item.waitingTime.toFixed(4)}
+                      </TableCell>
 
-                        <td>
-                          {getLatency(
-                            item
-                          ).toFixed(4)}
-                        </td>
+                      <TableCell>
+                        {item.throughput.toFixed(4)}
+                      </TableCell>
 
-                        <td>
-                          {(
-                            getECLO(item) *
-                            100
-                          ).toFixed(2)}
-                          %
-                        </td>
+                      <TableCell>
+                        {item.utilization.toFixed(2)}%
+                      </TableCell>
 
-                        <td>
-                          {getVMs(item)}
-                        </td>
+                      <TableCell>
+                        {item.vms}
+                      </TableCell>
 
-                        <td>
-                          {item.createdAt
-                            ? new Date(
-                                item.createdAt
-                              ).toLocaleString()
-                            : "-"}
-                        </td>
-
-                      </tr>
-                    )
-                  )}
-
+                      <TableCell>
+                        {item.eclo.toFixed(2)}%
+                      </TableCell>
+                    </tr>
+                  ))}
                 </tbody>
-
               </table>
+            </section>
+          </>
+        )}
 
-            </div>
+        {/* HISTORY */}
+        <section
+          style={{
+            background: "#ffffff",
+            padding: "25px",
+            borderRadius: "14px",
+            marginBottom: "25px",
+            boxShadow: "0 2px 10px rgba(0,0,0,0.08)",
+            overflowX: "auto",
+          }}
+        >
+          <h2>MongoDB Simulation History</h2>
 
+          {history.length === 0 ? (
+            <p>No simulations saved yet.</p>
+          ) : (
+            <table
+              style={{
+                width: "100%",
+                borderCollapse: "collapse",
+                minWidth: "700px",
+              }}
+            >
+              <thead>
+                <tr>
+                  <TableHeader>Algorithm</TableHeader>
+                  <TableHeader>Latency</TableHeader>
+                  <TableHeader>ECLO Score</TableHeader>
+                  <TableHeader>VMs</TableHeader>
+                  <TableHeader>Date</TableHeader>
+                </tr>
+              </thead>
+
+              <tbody>
+                {history.map((item, index) => {
+                  const metrics = item.metrics || item;
+
+                  const latency = Number(
+                    metrics?.latency ??
+                      metrics?.averageLatency ??
+                      0
+                  );
+
+                  let eclo = Number(
+                    metrics?.eclo ??
+                      metrics?.ecloScore ??
+                      item?.eclo ??
+                      0
+                  );
+
+                  if (eclo > 0 && eclo <= 1) {
+                    eclo *= 100;
+                  }
+
+                  const vms = Number(
+                    metrics?.vms ??
+                      metrics?.vmCount ??
+                      item?.vms ??
+                      1
+                  );
+
+                  return (
+                    <tr key={item._id || index}>
+                      <TableCell>
+                        {item.algorithm || "Unknown"}
+                      </TableCell>
+
+                      <TableCell>
+                        {latency.toFixed(4)}
+                      </TableCell>
+
+                      <TableCell>
+                        {eclo.toFixed(2)}%
+                      </TableCell>
+
+                      <TableCell>{vms}</TableCell>
+
+                      <TableCell>
+                        {item.createdAt
+                          ? new Date(
+                              item.createdAt
+                            ).toLocaleString()
+                          : "-"}
+                      </TableCell>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           )}
+        </section>
 
-        </div>
-
-        {/* FOOTER */}
-
-        <footer>
-
-          <strong>
-            Edge-Cloud Latency Optimization
-            (ECLO)
-          </strong>
-
-          <span>
-            Priority-Based Scheduling +
-            Dynamic VM Allocation
-          </span>
-
+        <footer
+          style={{
+            textAlign: "center",
+            padding: "20px",
+            color: "#666",
+          }}
+        >
+          Edge-Cloud Latency Optimization Simulation
         </footer>
-
-      </section>
-
+      </div>
     </main>
   );
 }
 
+/* ---------------- COMPONENTS ---------------- */
 
-/* CONFIG INPUT */
-
-function ConfigInput({
+function InputField({
   label,
+  name,
   value,
   onChange,
   step = "1",
 }) {
   return (
-    <label className="inputGroup">
-
-      <span>
+    <div>
+      <label
+        style={{
+          display: "block",
+          marginBottom: "7px",
+          fontWeight: "bold",
+        }}
+      >
         {label}
-      </span>
+      </label>
 
       <input
         type="number"
-        min="0"
-        step={step}
+        name={name}
         value={value}
+        step={step}
+        min="0"
         onChange={onChange}
+        style={{
+          width: "100%",
+          padding: "11px",
+          border: "1px solid #ccc",
+          borderRadius: "7px",
+          boxSizing: "border-box",
+          fontSize: "15px",
+        }}
       />
-
-    </label>
+    </div>
   );
 }
 
-
-/* STAT CARD */
-
-function StatCard({
-  title,
-  value,
-  icon,
-}) {
+function MetricCard({ title, value }) {
   return (
-    <div className="statCard">
-
-      <div className="statIcon">
-        {icon}
+    <div
+      style={{
+        padding: "20px",
+        borderRadius: "10px",
+        background: "#f8fafc",
+        border: "1px solid #e2e8f0",
+      }}
+    >
+      <div
+        style={{
+          color: "#64748b",
+          fontSize: "14px",
+          marginBottom: "8px",
+        }}
+      >
+        {title}
       </div>
 
-      <div>
-
-        <p>
-          {title}
-        </p>
-
-        <h3>
-          {value}
-        </h3>
-
+      <div
+        style={{
+          fontSize: "24px",
+          fontWeight: "bold",
+        }}
+      >
+        {value}
       </div>
-
     </div>
+  );
+}
+
+function ChartCard({ title, children }) {
+  return (
+    <section
+      style={{
+        background: "#ffffff",
+        padding: "25px",
+        borderRadius: "14px",
+        marginBottom: "25px",
+        boxShadow: "0 2px 10px rgba(0,0,0,0.08)",
+      }}
+    >
+      <h2>{title}</h2>
+
+      <div
+        style={{
+          width: "100%",
+          height: "400px",
+        }}
+      >
+        {children}
+      </div>
+    </section>
+  );
+}
+
+function TableHeader({ children }) {
+  return (
+    <th
+      style={{
+        padding: "13px",
+        textAlign: "left",
+        borderBottom: "2px solid #ddd",
+        background: "#f8fafc",
+      }}
+    >
+      {children}
+    </th>
+  );
+}
+
+function TableCell({ children }) {
+  return (
+    <td
+      style={{
+        padding: "13px",
+        borderBottom: "1px solid #eee",
+      }}
+    >
+      {children}
+    </td>
   );
 }
