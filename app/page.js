@@ -121,12 +121,16 @@ export default function Home() {
 
     let utilization = Number(
       metrics?.utilization ??
-        metrics?.utilizationPercent ??
-        metrics?.vmUtilization ??
-        item?.utilization ??
-        item?.utilizationPercent ??
-        item?.vmUtilization ??
-        0
+      metrics?.utilizationPercent ??
+      metrics?.vmUtilization ??
+      item?.utilization ??
+      item?.utilizationPercent ??
+      item?.vmUtilization ??
+      metrics?.cloudUtilization ??
+      metrics?.resourceUtilization ??
+      item?.cloudUtilization ??
+      item?.resourceUtilization ??
+      0
     );
 
     /*
